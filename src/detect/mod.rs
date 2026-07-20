@@ -270,6 +270,36 @@ pub fn identify_agent_in_job(job: &crate::platform::ForegroundJob) -> Option<(Ag
     best.map(|(_, agent, name)| (agent, name))
 }
 
+/// Name of the terminal editor running in a foreground job, if any. Scans the
+/// group leader first (the common case) and then every process, matching the
+/// normalized process name against the known terminal editors. Returns the
+/// canonical editor name (`nvim`/`vim`) so callers can drive it accordingly.
+pub fn job_editor_name(job: &crate::platform::ForegroundJob) -> Option<&'static str> {
+    if let Some(process) = job
+        .processes
+        .iter()
+        .find(|process| process.pid == job.process_group_id)
+    {
+        if let Some(editor) = editor_name(&normalized_process_name(process)) {
+            return Some(editor);
+        }
+    }
+
+    job.processes
+        .iter()
+        .find_map(|process| editor_name(&normalized_process_name(process)))
+}
+
+/// Map a normalized process name to a canonical terminal-editor name. Only
+/// editors driven by the `:edit +line` keystroke contract are recognized.
+fn editor_name(process_name: &str) -> Option<&'static str> {
+    match path_basename(&process_name.to_lowercase()) {
+        "nvim" => Some("nvim"),
+        "vim" | "vi" => Some("vim"),
+        _ => None,
+    }
+}
+
 /// Detect the state of an agent from the live terminal tail snapshot.
 /// If `agent` is `None`, returns `Unknown`.
 #[cfg(test)]
@@ -1037,6 +1067,53 @@ mod tests {
             )],
         };
         assert_eq!(identify_agent_in_job(&lookalike), None);
+    }
+
+    #[test]
+    fn job_editor_name_detects_nvim_and_vim() {
+        let nvim_job = crate::platform::ForegroundJob {
+            process_group_id: 10,
+            processes: vec![foreground_process(10, "nvim", &["nvim", "foo.rs"])],
+        };
+        assert_eq!(job_editor_name(&nvim_job), Some("nvim"));
+
+        let vim_job = crate::platform::ForegroundJob {
+            process_group_id: 11,
+            processes: vec![foreground_process(11, "vim", &["vim", "foo.rs"])],
+        };
+        assert_eq!(job_editor_name(&vim_job), Some("vim"));
+
+        let vi_job = crate::platform::ForegroundJob {
+            process_group_id: 12,
+            processes: vec![foreground_process(12, "vi", &["vi", "foo.rs"])],
+        };
+        assert_eq!(job_editor_name(&vi_job), Some("vim"));
+    }
+
+    #[test]
+    fn job_editor_name_finds_editor_behind_shell_leader() {
+        let job = crate::platform::ForegroundJob {
+            process_group_id: 20,
+            processes: vec![
+                foreground_process(20, "bash", &["bash"]),
+                foreground_process(21, "nvim", &["nvim", "src/main.rs"]),
+            ],
+        };
+
+        assert_eq!(job_editor_name(&job), Some("nvim"));
+    }
+
+    #[test]
+    fn job_editor_name_ignores_non_editors() {
+        let job = crate::platform::ForegroundJob {
+            process_group_id: 30,
+            processes: vec![
+                foreground_process(30, "bash", &["bash"]),
+                foreground_process(31, "node", &["node", "server.js"]),
+            ],
+        };
+
+        assert_eq!(job_editor_name(&job), None);
     }
 
     #[test]
