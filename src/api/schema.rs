@@ -232,6 +232,8 @@ pub enum Method {
     PaneReleaseAgent(PaneReleaseAgentParams),
     #[serde(rename = "pane.close")]
     PaneClose(PaneTarget),
+    #[serde(rename = "edit.open")]
+    EditOpen(EditOpenParams),
     #[serde(rename = "popup.close")]
     PopupClose(EmptyParams),
     #[serde(rename = "events.subscribe")]
