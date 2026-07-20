@@ -1861,6 +1861,10 @@ async fn run_client_loop(
                         title.as_deref(),
                     );
                 }
+                ServerMessage::FocusedPaneCwd { path } => {
+                    write_cwd_osc7(&path);
+                    let _ = io::stdout().flush();
+                }
                 ServerMessage::ReloadSoundConfig => {
                     reload_local_client_config(
                         &mut state.sound_config,
@@ -2354,6 +2358,43 @@ fn forward_clipboard(data: &str) {
     };
 
     crate::selection::write_osc52_bytes(&bytes);
+}
+
+fn window_title_osc(title: Option<&str>) -> Vec<u8> {
+    let title = title.unwrap_or("herdr");
+    let safe_title = title
+        .chars()
+        .filter(|ch| !matches!(*ch, '\u{1b}' | '\u{7}' | '\u{9c}'))
+        .collect::<String>();
+    format!("\x1b]0;{safe_title}\x07").into_bytes()
+}
+
+fn write_window_title(title: Option<&str>) {
+    let _ = io::stdout().write_all(&window_title_osc(title));
+}
+
+/// Build an OSC 7 `file://` cwd report for the host terminal. The host uses it
+/// to resolve relative file paths (e.g. Cmd-click links) against the focused
+/// pane's directory. The path is percent-encoded per RFC 3986 and the URI host
+/// is left empty (`file:///path`) so the host treats it as local.
+fn cwd_osc7(path: &str) -> Vec<u8> {
+    let mut encoded = String::with_capacity(path.len());
+    for &byte in path.as_bytes() {
+        // Leave unreserved characters and the path separator untouched;
+        // percent-encode everything else, including spaces and non-ASCII bytes.
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~' | b'/') {
+            encoded.push(byte as char);
+        } else {
+            encoded.push('%');
+            encoded.push(char::from_digit((byte >> 4) as u32, 16).unwrap_or('0'));
+            encoded.push(char::from_digit((byte & 0x0f) as u32, 16).unwrap_or('0'));
+        }
+    }
+    format!("\x1b]7;file://{encoded}\x07").into_bytes()
+}
+
+fn write_cwd_osc7(path: &str) {
+    let _ = io::stdout().write_all(&cwd_osc7(path));
 }
 
 // ---------------------------------------------------------------------------
@@ -3646,5 +3687,36 @@ mod tests {
         unsafe {
             std::env::remove_var("SSH_CONNECTION");
         }
+    }
+
+    #[test]
+    fn window_title_osc_strips_terminators_and_defaults_to_herdr() {
+        assert_eq!(
+            window_title_osc(Some("herdr\x1b api\u{7}\u{9c}")),
+            b"\x1b]0;herdr api\x07"
+        );
+        assert_eq!(window_title_osc(None), b"\x1b]0;herdr\x07");
+    }
+
+    #[test]
+    fn cwd_osc7_emits_empty_host_file_uri() {
+        assert_eq!(
+            cwd_osc7("/Users/can/herdr"),
+            b"\x1b]7;file:///Users/can/herdr\x07"
+        );
+    }
+
+    #[test]
+    fn cwd_osc7_percent_encodes_spaces_and_unicode() {
+        // Space -> %20, and a multibyte char is encoded byte-by-byte in UTF-8.
+        assert_eq!(
+            String::from_utf8(cwd_osc7("/tmp/a b/\u{e9}")).unwrap(),
+            "\x1b]7;file:///tmp/a%20b/%c3%a9\x07"
+        );
+        // Percent-signs in the path are themselves escaped so decoding round-trips.
+        assert_eq!(
+            String::from_utf8(cwd_osc7("/tmp/100%")).unwrap(),
+            "\x1b]7;file:///tmp/100%25\x07"
+        );
     }
 }

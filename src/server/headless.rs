@@ -265,6 +265,12 @@ const SHUTDOWN_API_TIMEOUT: Duration = Duration::from_secs(5);
 /// avoid reintroducing the idle CPU spin.
 const CLIENT_ACCEPT_POLL_INTERVAL: Duration = Duration::from_millis(250);
 
+/// How often the focused pane's foreground cwd is re-polled for OSC 7 reporting
+/// to the outer terminal. Resolving it walks the foreground process group, so
+/// this is kept coarse; relative-path link resolution does not need sub-second
+/// freshness.
+const FOCUSED_CWD_POLL_INTERVAL: Duration = Duration::from_millis(500);
+
 // ---------------------------------------------------------------------------
 // Headless server
 // ---------------------------------------------------------------------------
@@ -340,6 +346,12 @@ pub struct HeadlessServer {
     server_event_rx: mpsc::Receiver<ServerEvent>,
     /// Sender for server events (cloned for each client thread).
     server_event_tx: mpsc::Sender<ServerEvent>,
+    /// Next time the focused pane's foreground cwd should be re-polled for OSC 7
+    /// reporting. Resolving it walks the foreground process group, so it is
+    /// throttled rather than recomputed every loop tick.
+    next_focused_cwd_poll: Instant,
+    /// Last focused-pane foreground cwd resolved for OSC 7 reporting.
+    focused_pane_cwd: Option<PathBuf>,
 }
 
 fn apply_terminal_attach_scroll(
@@ -535,6 +547,8 @@ impl HeadlessServer {
             should_quit,
             server_event_rx,
             server_event_tx,
+            next_focused_cwd_poll: Instant::now(),
+            focused_pane_cwd: None,
         })
     }
 
@@ -704,6 +718,7 @@ impl HeadlessServer {
             self.sync_immediate_pty_sources();
             self.stream_host_mouse_capture_mode();
             self.stream_host_keyboard_enhancement_flags();
+            self.stream_focused_pane_cwd(now);
 
             // 7. Render virtually and stream frames. Hidden-only PTY work keeps a
             // bounded classification cadence without delaying presentation work
@@ -4085,6 +4100,70 @@ impl HeadlessServer {
         }
     }
 
+    /// Resolve the foreground working directory of the active workspace's
+    /// focused pane, if any. Walks the foreground process group, so callers
+    /// should throttle invocation rather than calling it every loop tick.
+    fn resolve_focused_pane_cwd(&self) -> Option<PathBuf> {
+        let ws_idx = self.app.state.active?;
+        let workspace = self.app.state.workspaces.get(ws_idx)?;
+        let pane_id = workspace.focused_pane_id()?;
+        let tab = workspace.active_tab()?;
+        tab.foreground_cwd_for_pane(pane_id, &self.app.terminal_runtimes)
+    }
+
+    /// Report the focused pane's foreground cwd to full-app clients via OSC 7 so
+    /// their outer terminals resolve relative file paths against the directory
+    /// the user is working in. Polling is throttled; sends are gated per client
+    /// on change. Never clears a previously reported cwd: a slightly stale
+    /// directory is still a better link base than Herdr's own process directory.
+    fn stream_focused_pane_cwd(&mut self, now: Instant) {
+        if now >= self.next_focused_cwd_poll {
+            self.next_focused_cwd_poll = now + FOCUSED_CWD_POLL_INTERVAL;
+            if let Some(cwd) = self.resolve_focused_pane_cwd() {
+                self.focused_pane_cwd = Some(cwd);
+            }
+        }
+
+        let Some(cwd) = self.focused_pane_cwd.clone() else {
+            return;
+        };
+        let serialized = match Self::frame_server_message(&ServerMessage::FocusedPaneCwd {
+            path: cwd.display().to_string(),
+        }) {
+            Ok(framed) => framed,
+            Err(err) => {
+                warn!(err = %err, "failed to serialize focused pane cwd for clients");
+                return;
+            }
+        };
+
+        let mut broken_clients: Vec<u64> = Vec::new();
+        for (&client_id, client) in &mut self.clients {
+            if !client.is_full_app_client() {
+                continue;
+            }
+            if client.host_reported_cwd.as_deref() == Some(cwd.as_path()) {
+                continue;
+            }
+            let Some(writer) = &client.writer else {
+                continue;
+            };
+            if writer.control.send(serialized.clone()).is_err() {
+                debug!(
+                    client_id,
+                    "client writer channel closed during focused pane cwd update"
+                );
+                broken_clients.push(client_id);
+                continue;
+            }
+            client.host_reported_cwd = Some(cwd.clone());
+        }
+
+        for client_id in broken_clients {
+            self.remove_client_and_resize_if_needed(client_id);
+        }
+    }
+
     fn has_pending_presentation_work(
         &self,
         needs_full_render: bool,
@@ -5417,6 +5496,8 @@ mod tests {
             should_quit,
             server_event_rx,
             server_event_tx,
+            next_focused_cwd_poll: Instant::now(),
+            focused_pane_cwd: None,
         }
     }
 
@@ -10025,6 +10106,59 @@ next_tab = ""
                     .expect("IME-compatible keyboard enhancement message")
             ),
             ServerMessage::KittyKeyboardReportAll { enabled: false }
+        ));
+    }
+
+    #[tokio::test]
+    async fn focused_pane_cwd_streams_once_per_change() {
+        let mut server = test_headless_server();
+        let (client_tx, client_control_rx, _client_rx) = test_client_writer();
+        server.clients.insert(
+            1,
+            ClientConnection::new(
+                (80, 24),
+                crate::kitty_graphics::HostCellSize::default(),
+                crate::terminal_theme::TerminalTheme::default(),
+                None,
+                1,
+                RenderEncoding::SemanticFrame,
+                Some(client_tx),
+            ),
+        );
+
+        // Skip the throttled foreground-process poll and drive the cached value
+        // directly so the gating behavior is deterministic without a live PTY.
+        let future = Instant::now() + Duration::from_secs(3600);
+        server.next_focused_cwd_poll = future;
+        server.focused_pane_cwd = Some(PathBuf::from("/repo/herdr"));
+
+        server.stream_focused_pane_cwd(Instant::now());
+        assert!(matches!(
+            read_server_message(
+                client_control_rx
+                    .recv_timeout(Duration::from_millis(100))
+                    .expect("focused pane cwd message")
+            ),
+            ServerMessage::FocusedPaneCwd { path } if path == "/repo/herdr"
+        ));
+
+        // Unchanged cwd: no repeat message.
+        server.stream_focused_pane_cwd(Instant::now());
+        assert!(client_control_rx
+            .recv_timeout(Duration::from_millis(50))
+            .is_err());
+
+        // Changed cwd: a fresh report is streamed.
+        server.next_focused_cwd_poll = future;
+        server.focused_pane_cwd = Some(PathBuf::from("/repo/other"));
+        server.stream_focused_pane_cwd(Instant::now());
+        assert!(matches!(
+            read_server_message(
+                client_control_rx
+                    .recv_timeout(Duration::from_millis(100))
+                    .expect("second focused pane cwd message")
+            ),
+            ServerMessage::FocusedPaneCwd { path } if path == "/repo/other"
         ));
     }
 

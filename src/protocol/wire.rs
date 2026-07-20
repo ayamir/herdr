@@ -753,6 +753,15 @@ pub enum ServerMessage {
 
     /// Suppress a direct command that expired before terminal delivery.
     GraphicsTransmissionRetired { transfer_id: u64, image_id: u32 },
+
+    /// Report the focused pane's foreground working directory to the client's
+    /// outer terminal via OSC 7. Lets the host terminal resolve relative file
+    /// paths (e.g. Cmd-click links) against the directory the user is working in,
+    /// instead of Herdr's own static process directory.
+    FocusedPaneCwd {
+        /// Absolute path of the focused pane's foreground process directory.
+        path: String,
+    },
 }
 
 // ---------------------------------------------------------------------------
