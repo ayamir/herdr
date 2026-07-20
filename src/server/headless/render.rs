@@ -1,6 +1,46 @@
 use super::*;
 
 impl HeadlessServer {
+    /// Reports each client shell's focused pane cwd to its host terminal via OSC 7.
+    ///
+    /// Resolving the cwd walks the foreground process group, so the lookup is
+    /// throttled and each host is updated only when its focused pane changes.
+    /// A missing cwd deliberately leaves the last report intact: a stale link
+    /// base is still preferable to falling back to Herdr's process directory.
+    pub(super) fn stream_focused_pane_cwd(&mut self, now: Instant) {
+        if now < self.next_focused_cwd_poll {
+            return;
+        }
+        self.next_focused_cwd_poll = now + FOCUSED_CWD_POLL_INTERVAL;
+
+        let updates = self
+            .clients
+            .iter()
+            .filter(|(_, client)| client.is_active_shell_client())
+            .filter_map(|(&client_id, client)| {
+                let cwd = self
+                    .shell_focused_runtime(client_id)
+                    .and_then(|(runtime, _)| runtime.foreground_cwd())?;
+                (client.host_reported_cwd.as_deref() != Some(cwd.as_path()))
+                    .then_some((client_id, cwd))
+            })
+            .collect::<Vec<_>>();
+
+        for (client_id, cwd) in updates {
+            if self.send_to_client(
+                client_id,
+                ServerMessage::EndpointControl {
+                    kind: crate::protocol::endpoint::HOST_CWD_KIND.into(),
+                    data: cwd.display().to_string(),
+                },
+            ) {
+                if let Some(client) = self.clients.get_mut(&client_id) {
+                    client.host_reported_cwd = Some(cwd);
+                }
+            }
+        }
+    }
+
     fn shell_focused_runtime(
         &self,
         client_id: u64,

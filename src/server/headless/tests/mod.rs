@@ -102,6 +102,7 @@ fn test_headless_server_with_event_hub(event_hub: api::EventHub) -> HeadlessServ
         should_quit,
         server_event_rx,
         server_event_tx,
+        next_focused_cwd_poll: Instant::now(),
     }
 }
 

@@ -1868,6 +1868,11 @@ async fn run_client_loop(
                         }
                     }
                     ServerMessage::EndpointControl { kind, data } => {
+                        if kind == crate::protocol::endpoint::HOST_CWD_KIND {
+                            write_cwd_osc7(&data);
+                            let _ = io::stdout().flush();
+                            continue;
+                        }
                         if kind == crate::protocol::endpoint::PRESENTATION_EFFECTS_READY_KIND {
                             let progress = pending_activation.as_mut().map(|activation| {
                                 activation.receive_presentation_effects_ready(
@@ -2145,6 +2150,26 @@ async fn run_client_loop(
     let _ = io::stdout().flush();
 
     Ok(())
+}
+
+/// Build an OSC 7 `file://` cwd report for the host terminal. The path is
+/// percent-encoded per RFC 3986 and uses an empty URI host (`file:///path`).
+fn cwd_osc7(path: &str) -> Vec<u8> {
+    let mut encoded = String::with_capacity(path.len());
+    for &byte in path.as_bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~' | b'/') {
+            encoded.push(byte as char);
+        } else {
+            encoded.push('%');
+            encoded.push(char::from_digit((byte >> 4) as u32, 16).unwrap_or('0'));
+            encoded.push(char::from_digit((byte & 0x0f) as u32, 16).unwrap_or('0'));
+        }
+    }
+    format!("\x1b]7;file://{encoded}\x07").into_bytes()
+}
+
+fn write_cwd_osc7(path: &str) {
+    let _ = io::stdout().write_all(&cwd_osc7(path));
 }
 
 #[cfg(test)]

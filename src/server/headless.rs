@@ -173,6 +173,10 @@ const SHUTDOWN_API_TIMEOUT: Duration = Duration::from_secs(5);
 /// avoid reintroducing the idle CPU spin.
 const CLIENT_ACCEPT_POLL_INTERVAL: Duration = Duration::from_millis(250);
 
+/// How often the focused pane's foreground cwd is checked for host-terminal
+/// OSC 7 reporting. Resolving it walks the foreground process group.
+const FOCUSED_CWD_POLL_INTERVAL: Duration = Duration::from_millis(500);
+
 // ---------------------------------------------------------------------------
 // Headless server
 // ---------------------------------------------------------------------------
@@ -254,6 +258,8 @@ pub struct HeadlessServer {
     server_event_rx: mpsc::Receiver<ServerEvent>,
     /// Sender for server events (cloned for each client thread).
     server_event_tx: mpsc::Sender<ServerEvent>,
+    /// Earliest time to refresh the focused pane's foreground cwd.
+    next_focused_cwd_poll: Instant,
 }
 
 #[cfg(windows)]
@@ -379,6 +385,7 @@ impl HeadlessServer {
             should_quit,
             server_event_rx,
             server_event_tx,
+            next_focused_cwd_poll: Instant::now(),
         })
     }
 
@@ -537,6 +544,7 @@ impl HeadlessServer {
             self.sync_immediate_pty_sources();
             self.stream_host_mouse_capture_mode();
             self.stream_direct_terminal_keyboard_mode();
+            self.stream_focused_pane_cwd(now);
 
             // 7. Render virtually and stream frames. Hidden-only PTY work keeps a
             // bounded classification cadence without delaying presentation work

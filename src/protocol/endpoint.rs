@@ -24,6 +24,8 @@ pub const SURFACE_INTEREST_CAPABILITY: &str = "surface_interest";
 pub const PRESENTATION_EFFECTS_FENCE_CAPABILITY: &str = "presentation_effects_fence";
 pub const PRESENTATION_EFFECTS_SYNC_KIND: &str = "endpoint.presentation.sync.v1";
 pub const PRESENTATION_EFFECTS_READY_KIND: &str = "endpoint.presentation.ready.v1";
+/// Host-terminal working-directory report for a client-owned shell.
+pub const HOST_CWD_KIND: &str = "endpoint.host.cwd.v1";
 pub const HEALTH_CHECK_CAPABILITY: &str = "health_check";
 pub const HEALTH_PING_KIND: &str = "endpoint.health.ping.v1";
 pub const HEALTH_PONG_KIND: &str = "endpoint.health.pong.v1";

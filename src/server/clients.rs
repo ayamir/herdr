@@ -157,6 +157,8 @@ pub(crate) struct ClientConnection {
     pub(crate) outer_terminal_focus: Option<bool>,
     /// Last focused-pane report-all demand sent to a client-owned shell.
     pub(crate) host_keyboard_report_all_active: Option<bool>,
+    /// Last focused-pane working directory reported to this shell's host terminal.
+    pub(crate) host_reported_cwd: Option<PathBuf>,
     /// Whether an ordinary render was skipped because the render channel was full.
     pub(crate) render_pending: bool,
     /// Whether this connection receives pane surfaces and may affect presentation state.
@@ -236,6 +238,7 @@ impl ClientConnection {
             host_terminal_appearance_explicit: false,
             outer_terminal_focus: None,
             host_keyboard_report_all_active: None,
+            host_reported_cwd: None,
             render_pending: false,
             shell_surface_active: true,
             shell_mouse_capture: false,

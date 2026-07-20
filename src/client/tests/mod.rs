@@ -373,6 +373,15 @@ fn kitty_graphics_cleanup_deletes_tracked_images_not_all_images() {
 }
 
 #[test]
+fn cwd_osc7_uses_an_empty_host_file_uri_and_percent_encodes_path_bytes() {
+    assert_eq!(
+        cwd_osc7("/tmp/a b/é"),
+        b"\x1b]7;file:///tmp/a%20b/%c3%a9\x07"
+    );
+    assert_eq!(cwd_osc7("/tmp/100%"), b"\x1b]7;file:///tmp/100%25\x07");
+}
+
+#[test]
 fn write_host_terminal_appearance_query_emits_mode_2031_query() {
     let mut output = Vec::new();
     write_host_terminal_appearance_query(&mut output).unwrap();
