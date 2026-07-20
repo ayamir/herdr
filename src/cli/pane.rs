@@ -1,3 +1,4 @@
+use crate::api::schema::EditOpenParams;
 use crate::api::schema::{
     Method, OutputMatch, PaneCurrentParams, PaneDirection, PaneEdgesParams,
     PaneFocusDirectionParams, PaneInputSetParams, PaneLayoutParams, PaneListParams,
@@ -50,6 +51,107 @@ pub(super) fn run_pane_command(args: &[String]) -> std::io::Result<i32> {
             Ok(2)
         }
     }
+}
+
+const EDIT_USAGE: &str = "usage: herdr edit <path> [--line N] [--column N] [--workspace ID]";
+
+/// Outcome of parsing `herdr edit` arguments, before contacting the server.
+#[derive(Debug)]
+enum EditArgs {
+    /// A `--help`/`-h` request; print usage on stdout and exit 0.
+    Help,
+    /// Successfully parsed parameters, ready to send.
+    Params(EditOpenParams),
+}
+
+pub(super) fn run_edit_command(args: &[String]) -> std::io::Result<i32> {
+    let params = match parse_edit_args(args) {
+        Ok(EditArgs::Params(params)) => params,
+        Ok(EditArgs::Help) => {
+            println!("{EDIT_USAGE}");
+            return Ok(0);
+        }
+        Err(message) => {
+            eprintln!("{message}");
+            return Ok(2);
+        }
+    };
+
+    super::print_response(&super::send_request(&Request {
+        id: "cli:edit:open".into(),
+        method: Method::EditOpen(params),
+    })?)
+}
+
+fn parse_edit_args(args: &[String]) -> Result<EditArgs, String> {
+    let mut path: Option<String> = None;
+    let mut line: Option<u32> = None;
+    let mut column: Option<u32> = None;
+    let mut workspace_id: Option<String> = None;
+
+    let mut index = 0;
+    while index < args.len() {
+        let arg = args[index].as_str();
+        // Accept both `--flag value` and `--flag=value`; the latter lets callers
+        // (e.g. tty7's file-open template) pass an option as a single token so it
+        // can be dropped whole when its value is absent.
+        let (name, inline_value) = match arg.split_once('=') {
+            Some((name, value)) if name.starts_with("--") => (name, Some(value.to_string())),
+            _ => (arg, None),
+        };
+        match name {
+            "--line" | "--column" | "--workspace" => {
+                let value = match inline_value {
+                    Some(value) => value,
+                    None => {
+                        let Some(value) = args.get(index + 1) else {
+                            return Err(format!("missing value for {name}"));
+                        };
+                        index += 1;
+                        value.clone()
+                    }
+                };
+                match name {
+                    "--line" => {
+                        let parsed = value
+                            .parse::<u32>()
+                            .map_err(|_| format!("invalid value for --line: {value}"))?;
+                        line = Some(parsed);
+                    }
+                    "--column" => {
+                        let parsed = value
+                            .parse::<u32>()
+                            .map_err(|_| format!("invalid value for --column: {value}"))?;
+                        column = Some(parsed);
+                    }
+                    _ => workspace_id = Some(super::normalize_workspace_id(&value)),
+                }
+                index += 1;
+            }
+            "help" | "--help" | "-h" => return Ok(EditArgs::Help),
+            other if other.starts_with('-') => {
+                return Err(format!("unknown option: {other}"));
+            }
+            other => {
+                if path.is_some() {
+                    return Err(EDIT_USAGE.to_string());
+                }
+                path = Some(other.to_string());
+                index += 1;
+            }
+        }
+    }
+
+    let Some(path) = path else {
+        return Err(EDIT_USAGE.to_string());
+    };
+
+    Ok(EditArgs::Params(EditOpenParams {
+        workspace_id,
+        path,
+        line,
+        column,
+    }))
 }
 
 fn pane_list(args: &[String]) -> std::io::Result<i32> {
@@ -2063,5 +2165,98 @@ mod tests {
         let err = parse_pane_wait_output_args(&args(&["issue-1", "--match", "a", "--regex", "b"]))
             .unwrap_err();
         assert!(err.contains("mutually exclusive"));
+    }
+
+    fn edit_params(values: &[&str]) -> EditOpenParams {
+        match parse_edit_args(&args(values)).unwrap() {
+            EditArgs::Params(params) => params,
+            EditArgs::Help => panic!("expected params, got help"),
+        }
+    }
+
+    #[test]
+    fn parse_edit_args_accepts_space_separated_flags() {
+        let params = edit_params(&["src/main.rs", "--line", "42", "--column", "7"]);
+
+        assert_eq!(params.path, "src/main.rs");
+        assert_eq!(params.line, Some(42));
+        assert_eq!(params.column, Some(7));
+        assert_eq!(params.workspace_id, None);
+    }
+
+    #[test]
+    fn parse_edit_args_accepts_inline_value_flags() {
+        let params = edit_params(&[
+            "src/main.rs",
+            "--line=42",
+            "--column=7",
+            "--workspace=issue-1",
+        ]);
+
+        assert_eq!(params.path, "src/main.rs");
+        assert_eq!(params.line, Some(42));
+        assert_eq!(params.column, Some(7));
+        assert_eq!(params.workspace_id, Some("issue-1".into()));
+    }
+
+    #[test]
+    fn parse_edit_args_allows_absent_optional_flags() {
+        let params = edit_params(&["src/main.rs"]);
+
+        assert_eq!(params.path, "src/main.rs");
+        assert_eq!(params.line, None);
+        assert_eq!(params.column, None);
+        assert_eq!(params.workspace_id, None);
+    }
+
+    #[test]
+    fn parse_edit_args_accepts_path_after_flags() {
+        let params = edit_params(&["--line=10", "src/lib.rs"]);
+
+        assert_eq!(params.path, "src/lib.rs");
+        assert_eq!(params.line, Some(10));
+    }
+
+    #[test]
+    fn parse_edit_args_requires_path() {
+        let err = parse_edit_args(&args(&["--line", "42"])).unwrap_err();
+
+        assert!(err.contains("usage: herdr edit"));
+    }
+
+    #[test]
+    fn parse_edit_args_rejects_invalid_line() {
+        let err = parse_edit_args(&args(&["src/main.rs", "--line", "abc"])).unwrap_err();
+
+        assert!(err.contains("invalid value for --line"));
+    }
+
+    #[test]
+    fn parse_edit_args_rejects_missing_flag_value() {
+        let err = parse_edit_args(&args(&["src/main.rs", "--line"])).unwrap_err();
+
+        assert!(err.contains("missing value for --line"));
+    }
+
+    #[test]
+    fn parse_edit_args_rejects_second_positional() {
+        let err = parse_edit_args(&args(&["a.rs", "b.rs"])).unwrap_err();
+
+        assert!(err.contains("usage: herdr edit"));
+    }
+
+    #[test]
+    fn parse_edit_args_rejects_unknown_option() {
+        let err = parse_edit_args(&args(&["src/main.rs", "--nope"])).unwrap_err();
+
+        assert!(err.contains("unknown option: --nope"));
+    }
+
+    #[test]
+    fn parse_edit_args_recognizes_help() {
+        assert!(matches!(
+            parse_edit_args(&args(&["--help"])).unwrap(),
+            EditArgs::Help
+        ));
     }
 }

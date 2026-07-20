@@ -1,5 +1,6 @@
 use bytes::Bytes;
 
+use crate::api::schema::EditOpenParams;
 use crate::api::schema::{
     EventData, EventEnvelope, EventKind, PaneClearAgentAuthorityParams, PaneCurrentParams,
     PaneDirection, PaneEdgesParams, PaneEdgesResult, PaneFocusDirectionParams,
@@ -1542,6 +1543,146 @@ impl App {
         encode_success(id, ResponseResult::Ok {})
     }
 
+    pub(super) fn handle_edit_open(&mut self, id: String, params: EditOpenParams) -> String {
+        let ws_idx = match params.workspace_id.as_deref() {
+            Some(workspace_id) => match self.parse_workspace_id(workspace_id) {
+                Some(ws_idx) => ws_idx,
+                None => {
+                    return encode_error(
+                        id,
+                        "workspace_not_found",
+                        format!("workspace {workspace_id} not found"),
+                    );
+                }
+            },
+            None => match self.state.active {
+                Some(ws_idx) => ws_idx,
+                None => return encode_error(id, "workspace_not_found", "no active workspace"),
+            },
+        };
+
+        match self.first_editor_pane_in_workspace(ws_idx) {
+            Some(pane_id) => self.edit_open_in_existing_pane(id, ws_idx, pane_id, &params),
+            None => self.edit_open_in_new_pane(id, ws_idx, &params),
+        }
+    }
+
+    /// First pane running a terminal editor (nvim/vim) in the workspace, scanned
+    /// in pane-enumeration order across all of the workspace's tabs.
+    fn first_editor_pane_in_workspace(&self, ws_idx: usize) -> Option<PaneId> {
+        let ws = self.state.workspaces.get(ws_idx)?;
+        ws.tabs
+            .iter()
+            .flat_map(|tab| tab.layout.pane_ids())
+            .find(|&pane_id| self.pane_runs_editor(ws_idx, pane_id))
+    }
+
+    fn pane_runs_editor(&self, ws_idx: usize, pane_id: PaneId) -> bool {
+        let Some(runtime) = self.lookup_runtime_sender(ws_idx, pane_id) else {
+            return false;
+        };
+        let Some(shell_pid) = runtime.child_pid() else {
+            return false;
+        };
+        crate::detect::foreground_job(shell_pid)
+            .is_some_and(|job| crate::detect::job_editor_name(&job).is_some())
+    }
+
+    /// Drive an already-running editor pane to `path` at the requested line by
+    /// focusing it and sending an `:edit` keystroke sequence.
+    fn edit_open_in_existing_pane(
+        &mut self,
+        id: String,
+        ws_idx: usize,
+        pane_id: PaneId,
+        params: &EditOpenParams,
+    ) -> String {
+        self.state.focus_pane_in_workspace(ws_idx, pane_id);
+        self.state.mark_active_tab_seen();
+        self.state.settle_terminal_mode_after_focus();
+
+        let bytes = nvim_open_keystrokes(&params.path, params.line, params.column);
+        let Some(runtime) = self.lookup_runtime_sender(ws_idx, pane_id) else {
+            return encode_error(id, "pane_not_found", "pane not found");
+        };
+        if let Err(err) = runtime.try_send_bytes(Bytes::from(bytes)) {
+            return encode_error(id, "pane_send_failed", err.to_string());
+        }
+
+        let Some(pane) = self.pane_info(ws_idx, pane_id) else {
+            return encode_error(id, "pane_not_found", "pane not found");
+        };
+        encode_success(id, ResponseResult::PaneInfo { pane })
+    }
+
+    /// Spawn a fresh editor pane on `path` in the workspace and focus it. Used
+    /// when the workspace has no editor pane to reuse.
+    fn edit_open_in_new_pane(
+        &mut self,
+        id: String,
+        ws_idx: usize,
+        params: &EditOpenParams,
+    ) -> String {
+        let Some(target_pane_id) = self
+            .state
+            .workspaces
+            .get(ws_idx)
+            .and_then(|ws| ws.focused_pane_id())
+        else {
+            return encode_error(id, "pane_not_found", "workspace has no pane to split");
+        };
+        let argv = nvim_spawn_argv(&params.path, params.line, params.column);
+        let (rows, cols) = self.state.estimate_pane_size();
+        let follow_cwd = self.launch_cwd_for_pane_in_workspace(ws_idx, target_pane_id);
+        let split_cwd = Some(self.resolve_new_terminal_cwd(follow_cwd));
+        let scrollback_limit_bytes = self.state.pane_scrollback_limit_bytes;
+        let host_terminal_theme = self.state.host_terminal_theme;
+        let host_terminal_appearance = self.state.host_terminal_appearance;
+        let previous_focus = self.state.current_pane_focus_target();
+        let Some(ws) = self.state.workspaces.get_mut(ws_idx) else {
+            return encode_error(id, "pane_not_found", "pane not found");
+        };
+        let split_result = ws.split_pane_argv_command(
+            target_pane_id,
+            ratatui::layout::Direction::Horizontal,
+            rows,
+            cols,
+            split_cwd,
+            &argv,
+            Vec::new(),
+            scrollback_limit_bytes,
+            host_terminal_theme,
+            host_terminal_appearance,
+            true,
+        );
+        let (target_tab_idx, new_pane) = match split_result {
+            Some(Ok(result)) => result,
+            Some(Err(err)) => return encode_error(id, "pane_split_failed", err.to_string()),
+            None => return encode_error(id, "pane_not_found", "pane not found"),
+        };
+        self.state.switch_workspace_tab(ws_idx, target_tab_idx);
+        self.state
+            .record_pane_focus_change(previous_focus, ws_idx, new_pane.pane_id);
+        self.state.settle_terminal_mode_after_focus();
+        self.terminal_runtimes
+            .insert(new_pane.terminal.id.clone(), new_pane.runtime);
+        self.state
+            .remove_alias_shadowed_by_new_pane(new_pane.pane_id);
+        self.state
+            .terminals
+            .insert(new_pane.terminal.id.clone(), new_pane.terminal);
+        self.schedule_session_save();
+        let Some(pane) = self.pane_info(ws_idx, new_pane.pane_id) else {
+            return encode_error(id, "pane_not_found", "pane not found");
+        };
+        self.emit_event(EventEnvelope {
+            event: EventKind::PaneCreated,
+            data: EventData::PaneCreated { pane: pane.clone() },
+        });
+        self.emit_layout_updated_event(ws_idx, target_tab_idx);
+        encode_success(id, ResponseResult::PaneInfo { pane })
+    }
+
     pub(super) fn handle_pane_close(&mut self, id: String, target: PaneTarget) -> String {
         match self.close_pane(id.clone(), &target) {
             Ok(()) => encode_success(id, ResponseResult::Ok {}),
@@ -1670,6 +1811,65 @@ fn normalize_state_labels(
 
 fn pane_not_found(id: String, pane_id: &str) -> String {
     encode_error(id, "pane_not_found", format!("pane {pane_id} not found"))
+}
+
+/// Keystrokes that drive an already-running nvim/vim to `path` at the requested
+/// location. Leads with `<Esc>` so the editor returns to normal mode from
+/// insert, visual, or command-line mode before the `:edit` runs. We avoid the
+/// canonical `<C-\><C-N>` terminal-mode escape because some configs remap bare
+/// `<C-\>` (e.g. nvchad's toggle-term binding); nvim would fire that mapping on
+/// the leading `0x1c` byte and open a `:terminal`, so the `:edit` would land in
+/// the shell instead of the command line.
+fn nvim_open_keystrokes(path: &str, line: Option<u32>, column: Option<u32>) -> Vec<u8> {
+    let mut cmd = String::from("\x1b:edit ");
+    if let Some(locate) = nvim_locate_cmd(line, column) {
+        cmd.push('+');
+        // In `:edit +cmd file`, spaces inside the +cmd must be backslash-escaped.
+        cmd.push_str(&locate.replace(' ', "\\ "));
+        cmd.push(' ');
+    }
+    cmd.push_str(&vim_fnameescape(path));
+    cmd.push('\r');
+    cmd.into_bytes()
+}
+
+/// Argv for spawning a fresh nvim on `path` at the requested location. These are
+/// exec arguments (no shell), so the path needs no escaping; the `+cmd` is a
+/// single argv token so its spaces are preserved literally.
+fn nvim_spawn_argv(path: &str, line: Option<u32>, column: Option<u32>) -> Vec<String> {
+    let mut argv = vec!["nvim".to_string()];
+    if let Some(locate) = nvim_locate_cmd(line, column) {
+        argv.push(format!("+{locate}"));
+    }
+    argv.push(path.to_string());
+    argv
+}
+
+/// The Vim command that positions the cursor after a file loads: a bare line
+/// number when only a line is known, otherwise `cursor(line, column)`.
+fn nvim_locate_cmd(line: Option<u32>, column: Option<u32>) -> Option<String> {
+    match (line, column) {
+        (Some(line), Some(column)) => Some(format!("call cursor({line},{column})")),
+        (Some(line), None) => Some(line.to_string()),
+        _ => None,
+    }
+}
+
+/// Escape a path for use as a Vim command-line file argument, mirroring Vim's
+/// `fnameescape()`: backslash-escape the characters Vim treats specially on the
+/// command line, plus a leading `+`, `>`, or `-`.
+fn vim_fnameescape(path: &str) -> String {
+    const SPECIAL: &[char] = &[
+        ' ', '\t', '\n', '*', '?', '[', '{', '`', '$', '\\', '%', '#', '\'', '"', '|', '!', '<',
+    ];
+    let mut out = String::with_capacity(path.len() + 8);
+    for (index, ch) in path.chars().enumerate() {
+        if SPECIAL.contains(&ch) || (index == 0 && matches!(ch, '+' | '>' | '-')) {
+            out.push('\\');
+        }
+        out.push(ch);
+    }
+    out
 }
 
 impl App {
@@ -4113,5 +4313,60 @@ mod tests {
 
             assert_eq!(metadata_error_code(&response), "invalid_metadata_ttl");
         }
+    }
+
+    #[test]
+    fn nvim_open_keystrokes_lead_with_normal_mode_and_escape_locate_spaces() {
+        let bytes = nvim_open_keystrokes("/repo/src/main.rs", Some(42), Some(7));
+        let text = String::from_utf8(bytes).unwrap();
+        // `<Esc>` returns to normal mode, then an escaped +cmd whose spaces
+        // are backslashed so `:edit` treats it as a single +cmd token.
+        assert_eq!(text, "\x1b:edit +call\\ cursor(42,7) /repo/src/main.rs\r");
+    }
+
+    #[test]
+    fn nvim_open_keystrokes_use_bare_line_without_column() {
+        let bytes = nvim_open_keystrokes("/repo/a.rs", Some(10), None);
+        let text = String::from_utf8(bytes).unwrap();
+        assert_eq!(text, "\x1b:edit +10 /repo/a.rs\r");
+    }
+
+    #[test]
+    fn nvim_open_keystrokes_omit_locate_without_line() {
+        let bytes = nvim_open_keystrokes("/repo/a.rs", None, None);
+        let text = String::from_utf8(bytes).unwrap();
+        assert_eq!(text, "\x1b:edit /repo/a.rs\r");
+    }
+
+    #[test]
+    fn nvim_open_keystrokes_escape_paths_with_spaces() {
+        let bytes = nvim_open_keystrokes("/repo/my file.rs", Some(3), None);
+        let text = String::from_utf8(bytes).unwrap();
+        assert_eq!(text, "\x1b:edit +3 /repo/my\\ file.rs\r");
+    }
+
+    #[test]
+    fn nvim_spawn_argv_keeps_locate_as_single_token() {
+        assert_eq!(
+            nvim_spawn_argv("/repo/my file.rs", Some(42), Some(7)),
+            vec![
+                "nvim".to_string(),
+                "+call cursor(42,7)".to_string(),
+                "/repo/my file.rs".to_string(),
+            ]
+        );
+        assert_eq!(
+            nvim_spawn_argv("/repo/a.rs", None, None),
+            vec!["nvim".to_string(), "/repo/a.rs".to_string()]
+        );
+    }
+
+    #[test]
+    fn vim_fnameescape_escapes_specials_and_leading_signs() {
+        assert_eq!(vim_fnameescape("/repo/a b.rs"), "/repo/a\\ b.rs");
+        assert_eq!(vim_fnameescape("+weird.rs"), "\\+weird.rs");
+        assert_eq!(vim_fnameescape("/repo/a#b%c.rs"), "/repo/a\\#b\\%c.rs");
+        // A `+` that is not leading is left untouched.
+        assert_eq!(vim_fnameescape("/repo/a+b.rs"), "/repo/a+b.rs");
     }
 }

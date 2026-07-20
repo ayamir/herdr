@@ -270,6 +270,24 @@ pub struct PaneSendInputParams {
     pub keys: Vec<String>,
 }
 
+/// Open a file in an editor pane. Routes to the first pane already running a
+/// supported editor (currently nvim/vim) in the target workspace, driving it to
+/// the file and line; when none exists, a new editor pane is spawned there.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct EditOpenParams {
+    /// Workspace to open the file in. Defaults to the active workspace.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_id: Option<String>,
+    /// Absolute path of the file to open.
+    pub path: String,
+    /// 1-based line to jump to.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub line: Option<u32>,
+    /// 1-based column to jump to.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub column: Option<u32>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct PaneReadParams {
     pub pane_id: String,

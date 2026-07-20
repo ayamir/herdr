@@ -123,6 +123,43 @@ fn agent_start_and_prompt_requests_round_trip() {
 }
 
 #[test]
+fn edit_open_request_round_trips_with_location() {
+    let request = Request {
+        id: "edit".into(),
+        method: Method::EditOpen(EditOpenParams {
+            workspace_id: Some("w_1".into()),
+            path: "/repo/src/main.rs".into(),
+            line: Some(42),
+            column: Some(7),
+        }),
+    };
+    let json = serde_json::to_value(&request).unwrap();
+    assert_eq!(json["method"], "edit.open");
+    assert_eq!(json["params"]["path"], "/repo/src/main.rs");
+    assert_eq!(json["params"]["line"], 42);
+    assert_eq!(json["params"]["column"], 7);
+    assert_eq!(serde_json::from_value::<Request>(json).unwrap(), request);
+}
+
+#[test]
+fn edit_open_request_omits_absent_location_fields() {
+    let request = Request {
+        id: "edit".into(),
+        method: Method::EditOpen(EditOpenParams {
+            workspace_id: None,
+            path: "/repo/README.md".into(),
+            line: None,
+            column: None,
+        }),
+    };
+    let json = serde_json::to_value(&request).unwrap();
+    assert_eq!(json["params"].get("workspace_id"), None);
+    assert_eq!(json["params"].get("line"), None);
+    assert_eq!(json["params"].get("column"), None);
+    assert_eq!(serde_json::from_value::<Request>(json).unwrap(), request);
+}
+
+#[test]
 fn bundled_protocol_schema_refs_resolve_inside_bundle() {
     fn assert_no_standalone_refs(value: &serde_json::Value) {
         match value {

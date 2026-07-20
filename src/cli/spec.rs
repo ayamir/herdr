@@ -39,6 +39,7 @@ pub(super) fn command() -> Command {
         .subcommand(notification_command())
         .subcommand(agent_command())
         .subcommand(pane_command())
+        .subcommand(edit_command())
         .subcommand(terminal_command())
         .subcommand(session_command())
         .subcommand(integration_command())
@@ -307,6 +308,15 @@ fn notification_command() -> Command {
                 ]))
                 .arg(option("sound", "SOUND").value_parser(["none", "done", "request"])),
         )
+}
+
+fn edit_command() -> Command {
+    Command::new("edit")
+        .about("Open a file in an editor pane in a workspace")
+        .arg(path_arg("path", "PATH"))
+        .arg(option("line", "N"))
+        .arg(option("column", "N"))
+        .arg(option("workspace", "ID"))
 }
 
 fn agent_command() -> Command {

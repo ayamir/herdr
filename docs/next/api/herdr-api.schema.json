@@ -1700,6 +1700,44 @@
           ],
           "type": "object"
         },
+        "EditOpenParams": {
+          "description": "Open a file in an editor pane. Routes to the first pane already running a\nsupported editor (currently nvim/vim) in the target workspace, driving it to\nthe file and line; when none exists, a new editor pane is spawned there.",
+          "properties": {
+            "column": {
+              "description": "1-based column to jump to.",
+              "format": "uint32",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "line": {
+              "description": "1-based line to jump to.",
+              "format": "uint32",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "path": {
+              "description": "Absolute path of the file to open.",
+              "type": "string"
+            },
+            "workspace_id": {
+              "description": "Workspace to open the file in. Defaults to the active workspace.",
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "path"
+          ],
+          "type": "object"
+        },
         "EmptyParams": {
           "type": "object"
         },
@@ -5602,6 +5640,22 @@
             },
             "params": {
               "$ref": "#/schemas/request/$defs/PaneTarget"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "edit.open",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/EditOpenParams"
             }
           },
           "required": [
