@@ -153,6 +153,9 @@ pub fn plan(source: &str, agent: &str, session_ref: &AgentSessionRef) -> Option<
         ("herdr:pi", "pi", AgentSessionRefKind::Path | AgentSessionRefKind::Id) => {
             vec!["pi".into(), "--session".into(), session_ref.value.clone()]
         }
+        ("herdr:traex", "traex", AgentSessionRefKind::Id) => {
+            vec!["traex".into(), "resume".into(), session_ref.value.clone()]
+        }
         ("herdr:omp", "omp", AgentSessionRefKind::Path | AgentSessionRefKind::Id) => {
             // omp resume is `-r, --resume=<value>` (ID prefix or path); it has no
             // `--session` flag, unlike pi.
@@ -236,6 +239,7 @@ pub(crate) fn is_official_agent_source(source: &str, agent: &str) -> bool {
             | ("herdr:omp", "omp")
             | ("herdr:mastracode", "mastracode")
             | ("herdr:pi", "pi")
+            | ("herdr:traex", "traex")
             | ("herdr:hermes", "hermes")
             | ("herdr:opencode", "opencode")
             | ("herdr:qodercli", "qodercli")
@@ -365,6 +369,16 @@ mod tests {
             .unwrap()
             .argv,
             vec!["pi", "--session", pi_session.as_str()]
+        );
+        assert_eq!(
+            plan(
+                "herdr:traex",
+                "traex",
+                &AgentSessionRef::id("traex-session").unwrap()
+            )
+            .unwrap()
+            .argv,
+            vec!["traex", "resume", "traex-session"]
         );
         assert_eq!(
             plan(
@@ -601,6 +615,11 @@ mod tests {
                 .unwrap();
         assert_eq!(session_ref.kind, AgentSessionRefKind::Id);
         assert_eq!(session_ref.value, "agy-id");
+
+        let session_ref =
+            session_ref_from_report("herdr:traex", "traex", Some("traex-id".into()), None).unwrap();
+        assert_eq!(session_ref.kind, AgentSessionRefKind::Id);
+        assert_eq!(session_ref.value, "traex-id");
     }
 
     #[test]
@@ -670,6 +689,7 @@ mod tests {
         let kilo_session = absolute_test_path("kilo-session");
         let copilot_session = absolute_test_path("copilot-session");
         let devin_session = absolute_test_path("devin-session");
+        let traex_session = absolute_test_path("traex-session");
         assert!(plan(
             "herdr:hermes",
             "hermes",
@@ -698,6 +718,12 @@ mod tests {
             "herdr:devin",
             "devin",
             &AgentSessionRef::path(&devin_session).unwrap()
+        )
+        .is_none());
+        assert!(plan(
+            "herdr:traex",
+            "traex",
+            &AgentSessionRef::path(&traex_session).unwrap()
         )
         .is_none());
         assert!(session_ref_from_snapshot(
@@ -740,6 +766,13 @@ mod tests {
             "devin",
             AgentSessionRefKind::Id,
             "devin-session"
+        )
+        .is_some());
+        assert!(session_ref_from_snapshot(
+            "herdr:traex",
+            "traex",
+            AgentSessionRefKind::Id,
+            "traex-session"
         )
         .is_some());
         assert!(session_ref_from_snapshot(
