@@ -1506,7 +1506,7 @@ fn stop_server_via_api_at(socket_path: &Path, timeout: Duration) -> Result<(), S
 }
 
 #[cfg(not(windows))]
-fn send_server_update_method_at(
+pub(crate) fn send_server_update_method_at(
     socket_path: &Path,
     timeout: Duration,
     request_id: &str,

@@ -1742,6 +1742,13 @@ async fn run_client_loop(
                         let _ = stdout.flush();
                     }
                 }
+                ServerMessage::Osc5522 { bytes } => {
+                    // Forward the raw OSC 5522 sequence to the outer terminal
+                    // (tty7) verbatim, so it can handle the clipblob write.
+                    let mut stdout = io::stdout();
+                    let _ = stdout.write_all(&bytes);
+                    let _ = stdout.flush();
+                }
                 ServerMessage::TerminalBell { count } => {
                     if let Err(err) =
                         crate::terminal_effects::write_terminal_bells(&mut io::stdout(), count)

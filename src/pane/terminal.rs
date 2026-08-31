@@ -10,7 +10,7 @@ use ratatui::{layout::Rect, Frame};
 #[cfg(any(unix, test))]
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
-use tracing::{debug, error};
+use tracing::{debug, error, info};
 use unicode_width::UnicodeWidthStr;
 
 use crate::layout::PaneId;
@@ -152,6 +152,7 @@ pub(crate) struct ProcessBytesResult {
     pub terminal_title_changed: bool,
     pub terminal_bells: u16,
     pub clipboard_writes: Vec<Vec<u8>>,
+    pub osc5522_writes: Vec<Vec<u8>>,
     pub reported_cwd: Option<std::path::PathBuf>,
     pub terminal_responses: Vec<Bytes>,
 }
@@ -188,6 +189,13 @@ pub(crate) struct GhosttyPaneCore {
     decscusr_tracker: DecscusrTracker,
     cursor_settle_state: CursorPositionSettleState,
     windows_powershell_prompt_cwd_reporting: bool,
+    /// Buffer for OSC 5522 clipboard-write bytes that span multiple PTY read
+    /// chunks (PTY reads come in ~4KB slices; the 5522 frames are streamed and
+    /// often span chunk boundaries). Accumulate until the ST/BEL terminator, so
+    /// the ghostty core never sees a partial frame as text.
+    pub pending_osc5522: Vec<u8>,
+    /// True while we're mid-OSC-5522 frame (between `ESC]5522;` and its terminator).
+    pub in_osc5522: bool,
 }
 
 pub(crate) struct PaneTerminal {
@@ -1065,6 +1073,8 @@ impl GhosttyPaneTerminal {
                 decscusr_tracker: DecscusrTracker::default(),
                 cursor_settle_state: CursorPositionSettleState::default(),
                 windows_powershell_prompt_cwd_reporting: false,
+                pending_osc5522: Vec::new(),
+                in_osc5522: false,
             }),
             key_encoder: Mutex::new(key_encoder),
             pending_pty_responses,
@@ -1229,6 +1239,7 @@ impl GhosttyPaneTerminal {
                 terminal_title_changed: false,
                 terminal_bells: 0,
                 clipboard_writes: Vec::new(),
+                osc5522_writes: Vec::new(),
                 reported_cwd: None,
                 terminal_responses: Vec::new(),
             };
@@ -1292,6 +1303,33 @@ impl GhosttyPaneTerminal {
         core.xtgettcap_query_tracker
             .observe(filtered_bytes.as_ref());
         core.decscusr_tracker.observe(filtered_bytes.as_ref());
+        // Extract OSC 5522 clipboard writes verbatim so the ghostty core never
+        // sees them (it would swallow the unknown OSC) and forward them to the
+        // host terminal (tty7) untouched.
+        //
+        // PTY reads arrive in ~4KB slices while OSC 5522 frames carry a large
+        // base64 payload, so frames routinely straddle chunk boundaries. Any
+        // unterminated tail (a partial frame, or a partial `ESC]5522;` header)
+        // is carried over in `core.pending_osc5522` and re-scanned with the next
+        // chunk, so frame bytes never reach the ghostty core as visible text.
+        let mut osc5522_pending = std::mem::take(&mut core.pending_osc5522);
+        let mut osc5522_in_frame = core.in_osc5522;
+        let (kept, osc5522_writes) = strip_osc5522(
+            filtered_bytes.as_ref(),
+            &mut osc5522_pending,
+            &mut osc5522_in_frame,
+        );
+        core.pending_osc5522 = osc5522_pending;
+        core.in_osc5522 = osc5522_in_frame;
+        if !osc5522_writes.is_empty() {
+            info!(
+                pane = pane_id.raw(),
+                frames = osc5522_writes.len(),
+                "stripped OSC 5522 clipboard frames"
+            );
+        }
+        let filtered_bytes: std::borrow::Cow<'_, [u8]> = std::borrow::Cow::Owned(kept);
+
         let in_progress_default_color_event = core.default_color_event_tracker.in_progress_event();
         let default_color_events = core.default_color_event_tracker.drain_pending();
         let xtgettcap_responses = core.xtgettcap_query_tracker.drain_pending();
@@ -1364,6 +1402,7 @@ impl GhosttyPaneTerminal {
             terminal_title_changed,
             terminal_bells,
             clipboard_writes,
+            osc5522_writes,
             reported_cwd,
             terminal_responses,
         }
@@ -2860,6 +2899,104 @@ fn is_halfwidth_katakana_voiced_grapheme(symbol: &str) -> bool {
     chars.next().is_none()
         && ('\u{ff66}'..='\u{ff9d}').contains(&base)
         && matches!(mark, '\u{ff9e}' | '\u{ff9f}')
+}
+
+/// Split OSC 5522 clipboard frames out of a PTY chunk.
+///
+/// Returns `(bytes to feed the terminal emulator, whole frames to forward to the
+/// host terminal)`. The ghostty core swallows unknown OSC sequences, so these
+/// frames must never reach it.
+///
+/// Frames are much larger than a PTY read, so `pending`/`in_frame` carry an
+/// unterminated tail — either a partial frame or a partial `ESC]5522;` header —
+/// over to the next call.
+fn strip_osc5522(
+    chunk: &[u8],
+    pending: &mut Vec<u8>,
+    in_frame: &mut bool,
+) -> (Vec<u8>, Vec<Vec<u8>>) {
+    const HEADER: &[u8] = b"]5522;";
+    let mut writes: Vec<Vec<u8>> = Vec::new();
+    let mut buf = std::mem::take(pending);
+    buf.extend_from_slice(chunk);
+    let mut kept = Vec::with_capacity(buf.len());
+    let mut start = 0usize;
+    let mut i = 0usize;
+    while i < buf.len() {
+        if *in_frame {
+            // ST (ESC \) or BEL ends the frame. Neither byte occurs in the base64
+            // payload or the ASCII header, so a plain scan is safe. Both bytes of
+            // the ST must be consumed, otherwise the `\` is re-emitted as text.
+            if buf[i] == 0x07 || (buf[i] == b'\\' && i > start && buf[i - 1] == 0x1b) {
+                writes.push(buf[start..=i].to_vec());
+                *in_frame = false;
+                i += 1;
+                start = i;
+            } else {
+                i += 1;
+            }
+            continue;
+        }
+        if buf[i] == 0x1b {
+            match buf.get(i + 1..i + 1 + HEADER.len()) {
+                Some(h) if h == HEADER => {
+                    *in_frame = true;
+                    start = i;
+                    i += 1 + HEADER.len();
+                    continue;
+                }
+                Some(_) => {}
+                // Chunk ends mid-header: defer rather than leak the payload that
+                // arrives in the next chunk.
+                None if HEADER.starts_with(&buf[i + 1..]) => break,
+                None => {}
+            }
+        }
+        kept.push(buf[i]);
+        i += 1;
+    }
+    *pending = if *in_frame {
+        buf[start..].to_vec()
+    } else {
+        buf[i..].to_vec()
+    };
+    (kept, writes)
+}
+
+#[cfg(test)]
+mod osc5522_tests {
+    use super::strip_osc5522;
+
+    fn run(chunks: &[&[u8]]) -> (Vec<u8>, usize) {
+        let (mut pending, mut in_frame) = (Vec::new(), false);
+        let (mut kept, mut frames) = (Vec::new(), 0);
+        for c in chunks {
+            let (k, w) = strip_osc5522(c, &mut pending, &mut in_frame);
+            kept.extend(k);
+            frames += w.len();
+        }
+        (kept, frames)
+    }
+
+    #[test]
+    fn strips_frames_at_every_chunk_boundary() {
+        let s: &[u8] = b"A\x1b]5522;type=write:id=zz\x1b\\B\x1b]5522;type=wdata\x1b\\C\n";
+        let want = (b"ABC\n".to_vec(), 2);
+        assert_eq!(run(&[s]), want);
+        for i in 1..s.len() {
+            assert_eq!(run(&[&s[..i], &s[i..]]), want, "split at {i}");
+        }
+        let bytewise: Vec<&[u8]> = s.chunks(1).collect();
+        assert_eq!(run(&bytewise), want);
+    }
+
+    #[test]
+    fn leaves_other_sequences_alone() {
+        assert_eq!(run(&[b"X\x1b]5522;q\x07Y"]), (b"XY".to_vec(), 1));
+        let plain: &[u8] = b"\x1b[31mhi\x1b[0m\x1b]0;title\x07";
+        assert_eq!(run(&[plain]), (plain.to_vec(), 0));
+        assert_eq!(run(&[b"ok\x1b", b"[1m"]), (b"ok\x1b[1m".to_vec(), 0));
+    }
 }
 
 fn ghostty_buffer_symbol_into<'a>(

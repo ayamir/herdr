@@ -682,6 +682,16 @@ pub enum ServerMessage {
         bytes: Vec<u8>,
     },
 
+    /// OSC 5522 clipboard-write bytes (Kitty streaming clipboard protocol) that
+    /// must be forwarded verbatim to the host terminal instead of being parsed
+    /// by the ghostty core (which would swallow the unknown OSC). The client
+    /// writes these bytes straight to stdout so the outer terminal (e.g. tty7)
+    /// can handle them.
+    Osc5522 {
+        /// Raw OSC 5522 sequence bytes.
+        bytes: Vec<u8>,
+    },
+
     /// Server is shutting down. Clients should exit gracefully.
     ServerShutdown {
         /// Optional reason for the shutdown.

@@ -2347,6 +2347,15 @@ impl HeadlessServer {
                 }
                 true
             }
+            AppEvent::Osc5522 { bytes } => {
+                // Forward the raw OSC 5522 sequence verbatim to the foreground
+                // client, which writes it to stdout so the outer terminal (tty7)
+                // handles the clipboard write.
+                self.send_to_foreground_client(ServerMessage::Osc5522 {
+                    bytes: bytes.clone(),
+                });
+                true
+            }
             AppEvent::PrefixInputSource { active } => {
                 // Input-source switching is a client-local host side effect; forward it to the
                 // foreground client (which owns the real TIS switch + run-loop pump), like clipboard.

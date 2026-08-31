@@ -596,6 +596,46 @@ fn main() -> io::Result<()> {
         return client::run_client();
     }
 
+    if args.get(1).map(|s| s.as_str()) == Some("live-handoff") {
+        // Manually hand a running herdr server off to a patched/local binary.
+        // Mirrors `herdr update --handoff` but uses the given executable path as
+        // `import_exe` instead of a downloaded release.
+        let exe = args.get(2).cloned().unwrap_or_default();
+        if exe.is_empty() {
+            eprintln!("usage: herdr live-handoff <path-to-new-herdr-binary>");
+            std::process::exit(2);
+        }
+        let new_exe = std::path::PathBuf::from(&exe);
+        if !new_exe.exists() {
+            eprintln!("error: new herdr binary not found: {exe}");
+            std::process::exit(1);
+        }
+        let sock = crate::session::active_api_socket_path();
+        use crate::api::schema::{Method, ServerLiveHandoffParams};
+        let params = ServerLiveHandoffParams {
+            import_exe: Some(exe.clone()),
+            expected_protocol: None,
+            expected_version: None,
+        };
+        eprintln!("handing off live panes to {exe} via {}...", sock.display());
+        match crate::update::send_server_update_method_at(
+            &sock,
+            std::time::Duration::from_secs(30),
+            "live-handoff",
+            Method::ServerLiveHandoff(params),
+            "server live handoff",
+        ) {
+            Ok(_) => {
+                eprintln!("live handoff complete; old server exiting.");
+                return Ok(());
+            }
+            Err(e) => {
+                eprintln!("live handoff failed: {e}");
+                std::process::exit(1);
+            }
+        }
+    }
+
     if args.get(1).map(|s| s.as_str()) == Some("update") {
         let options = match update::parse_self_update_args(&args[2..]) {
             Ok(options) => options,

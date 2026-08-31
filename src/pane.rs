@@ -1967,12 +1967,12 @@ impl PaneRuntime {
                 if let Some(cwd) = result.reported_cwd.clone() {
                     publish_reported_cwd(pane_id, cwd, &reported_cwd, &read_events);
                 }
-                for content in result.clipboard_writes {
-                    if let Err(err) = read_events.try_send(AppEvent::ClipboardWrite { content }) {
+                for bytes in result.osc5522_writes {
+                    if let Err(err) = read_events.try_send(AppEvent::Osc5522 { bytes }) {
                         warn!(
                             pane = pane_id.raw(),
                             err = %err,
-                            "failed to queue OSC 52 clipboard write"
+                            "failed to queue OSC 5522 clipboard write"
                         );
                     }
                 }
@@ -2138,12 +2138,12 @@ impl PaneRuntime {
                 if let Some(cwd) = result.reported_cwd.clone() {
                     publish_reported_cwd(pane_id, cwd, &reported_cwd, &events);
                 }
-                for content in result.clipboard_writes {
-                    if let Err(err) = events.try_send(AppEvent::ClipboardWrite { content }) {
+                for bytes in result.osc5522_writes {
+                    if let Err(err) = events.try_send(AppEvent::Osc5522 { bytes }) {
                         warn!(
                             pane = pane_id.raw(),
                             err = %err,
-                            "failed to send OSC 52 clipboard write"
+                            "failed to send OSC 5522 clipboard write"
                         );
                     }
                 }
