@@ -26,6 +26,8 @@ pub const PRESENTATION_EFFECTS_SYNC_KIND: &str = "endpoint.presentation.sync.v1"
 pub const PRESENTATION_EFFECTS_READY_KIND: &str = "endpoint.presentation.ready.v1";
 /// Host-terminal working-directory report for a client-owned shell.
 pub const HOST_CWD_KIND: &str = "endpoint.host.cwd.v1";
+/// Raw OSC 5522 bytes for the client host terminal, encoded as standard base64.
+pub const HOST_OSC5522_KIND: &str = "endpoint.host.osc5522.v1";
 pub const HEALTH_CHECK_CAPABILITY: &str = "health_check";
 pub const HEALTH_PING_KIND: &str = "endpoint.health.ping.v1";
 pub const HEALTH_PONG_KIND: &str = "endpoint.health.pong.v1";

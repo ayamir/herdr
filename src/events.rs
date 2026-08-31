@@ -143,6 +143,9 @@ pub enum AppEvent {
     /// A pane child emitted a valid OSC 52 clipboard write. The main loop
     /// re-emits it through herdr's own clipboard writer.
     ClipboardWrite { content: Vec<u8> },
+    /// Raw OSC 5522 clipboard-write bytes captured before the ghostty core saw
+    /// them. The foreground client forwards them verbatim to its host terminal.
+    Osc5522 { bytes: Vec<u8> },
     /// A pane child reported its shell current directory through terminal
     /// metadata such as OSC 7.
     TerminalCwdReported {

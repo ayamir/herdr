@@ -351,6 +351,13 @@ impl HeadlessServer {
                 self.send_to_foreground_client(ServerMessage::Clipboard { data });
                 false
             }
+            AppEvent::Osc5522 { bytes } => {
+                self.send_to_foreground_client(ServerMessage::EndpointControl {
+                    kind: crate::protocol::endpoint::HOST_OSC5522_KIND.into(),
+                    data: base64::engine::general_purpose::STANDARD.encode(bytes),
+                });
+                false
+            }
             AppEvent::StateChanged { pane_id, agent, .. } => {
                 // Capture toast before handling.
                 let toast_before = self.app.state.toast.clone();

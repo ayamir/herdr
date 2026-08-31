@@ -38,6 +38,7 @@ mod terminal_setup;
 mod timer;
 mod transport;
 
+use base64::Engine;
 #[cfg(test)]
 use clipboard_forwarding::decode_clipboard_payload;
 use clipboard_forwarding::forward_clipboard;
@@ -1871,6 +1872,16 @@ async fn run_client_loop(
                         if kind == crate::protocol::endpoint::HOST_CWD_KIND {
                             write_cwd_osc7(&data);
                             let _ = io::stdout().flush();
+                            continue;
+                        }
+                        if kind == crate::protocol::endpoint::HOST_OSC5522_KIND {
+                            if let Ok(bytes) =
+                                base64::engine::general_purpose::STANDARD.decode(data)
+                            {
+                                let mut stdout = io::stdout();
+                                let _ = stdout.write_all(&bytes);
+                                let _ = stdout.flush();
+                            }
                             continue;
                         }
                         if kind == crate::protocol::endpoint::PRESENTATION_EFFECTS_READY_KIND {
