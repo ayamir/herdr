@@ -1577,6 +1577,22 @@ fn publish_terminal_bells(pane_id: PaneId, count: u16, events: &mpsc::Sender<App
     }
 }
 
+fn publish_clipboard_writes(
+    pane_id: PaneId,
+    writes: Vec<Vec<u8>>,
+    events: &mpsc::Sender<AppEvent>,
+) {
+    for content in writes {
+        if let Err(err) = events.try_send(AppEvent::ClipboardWrite { content }) {
+            warn!(
+                pane = pane_id.raw(),
+                err = %err,
+                "failed to queue clipboard write"
+            );
+        }
+    }
+}
+
 fn publish_reported_cwd(
     pane_id: PaneId,
     cwd: std::path::PathBuf,
@@ -1947,6 +1963,7 @@ impl PaneRuntime {
                     terminal.process_pty_bytes(pane_id, shell_pid, bytes, &response_writer);
                 content_seq.fetch_add(1, Ordering::Release);
                 publish_terminal_bells(pane_id, result.terminal_bells, &read_events);
+                publish_clipboard_writes(pane_id, result.clipboard_writes, &read_events);
                 observe_detection_content_change(bytes, &detection_content_seq);
                 let title_requested =
                     result.terminal_title_changed && render_dirty.request_terminal_title(pane_id);
@@ -2116,6 +2133,7 @@ impl PaneRuntime {
                     terminal.process_pty_bytes(pane_id, shell_pid, bytes, &response_writer);
                 content_seq.fetch_add(1, Ordering::Release);
                 publish_terminal_bells(pane_id, result.terminal_bells, &events);
+                publish_clipboard_writes(pane_id, result.clipboard_writes, &events);
                 if agent_detection == AgentDetection::Enabled {
                     observe_detection_content_change(bytes, &detection_content_seq);
                 }
@@ -4493,6 +4511,41 @@ mod tests {
         .expect("PTY reader should publish terminal bells");
 
         assert_eq!(bell, (pane_id, 2));
+        runtime.shutdown();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn spawned_pty_reader_publishes_clipboard_writes() {
+        let (events, mut event_rx) = mpsc::channel(8);
+        let runtime = PaneRuntime::spawn_shell_command(
+            PaneId::from_raw(42),
+            24,
+            80,
+            std::env::temp_dir(),
+            "printf '\\033]52;c;Y2xpcGJvYXJk\\007'; sleep 0.05",
+            &PaneLaunchEnv::default(),
+            AgentDetection::Disabled,
+            0,
+            crate::terminal_theme::TerminalTheme::default(),
+            None,
+            events,
+            Arc::new(Notify::new()),
+            Arc::new(RenderSignal::new()),
+        )
+        .unwrap();
+
+        let content = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                if let Some(AppEvent::ClipboardWrite { content }) = event_rx.recv().await {
+                    break content;
+                }
+            }
+        })
+        .await
+        .expect("PTY reader should publish clipboard writes");
+
+        assert_eq!(content, b"clipboard");
         runtime.shutdown();
     }
 
