@@ -406,6 +406,16 @@ fn muse_manifest_requires_complete_live_controls() {
 }
 
 #[test]
+fn traex_manifest_detects_live_idle_composer() {
+    let idle = explain(
+        Agent::Traex,
+        "❯ Use /skills to list available skills\n────────────────────────────────────────────────────\n  GPT-5.6-Terra (MAX) medium · Context 100% left ·… ▧ Workspace Edit (shift+tab to cycle)",
+    );
+    assert_eq!(idle.state, AgentState::Idle);
+    assert!(idle.visible_idle);
+}
+
+#[test]
 fn manifest_validation_rejects_unknown_fields_empty_rules_invalid_regions_and_regexes() {
     assert!(parse_manifest(
         r#"
