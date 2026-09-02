@@ -1,0 +1,17 @@
+id = "traex"
+version = "2026.09.02.1"
+min_engine_version = 1
+updated_at = "2026-09-02T00:00:00Z"
+aliases = ["traecli"]
+
+# Evidence: TraeCode CLI 0.202.1, captured through Herdr's detection buffer.
+# The live composer begins with `❯`; the footer is TraeX-specific and keeps a
+# shell prompt or pasted transcript from being mistaken for an idle agent.
+[[rules]]
+id = "idle_composer"
+state = "idle"
+priority = 700
+region = "bottom_non_empty_lines(4)"
+visible_idle = true
+contains = ["Context"]
+line_regex = ['^❯(?:\s|$)']
